@@ -9,8 +9,9 @@
 4. [Create Kafka Client to Produce and Consume using Schema Registry](#step-4)
 5. [How Schema Registry handle mismatch format data](#step-5)
 6. [How Kafka Client Dynamically evolve the data](#step-6)
-7. [Clean Up Resources](#step-7)
-8. [Confluent Resources and Further Testing](#step-8)
+7. [CSFLE for Producer and Consumer](#step-7)
+8. [Clean Up Resources](#step-8)
+9. [Confluent Resources and Further Testing](#step-9)
 
 ***
 
@@ -34,6 +35,9 @@
 <div align="center" padding=25px>
     <img src="images/survey3.png" width=75% height=75%>
 </div>
+
+2. Confluent Cloud cluster with Advanced Stream Governance package
+3. For clients, Confluent Platform 7.4.5, 7.5.4, 7.6.1 or higher are required.
 
 ***
 
@@ -187,8 +191,110 @@ cd ../SpringAvroConsumerv2
 ```
 
 5. Why both consume can still consume the data even though the producer already change the schema that being produce?
+***
 
-## <a name="step-7"></a>Clean Up Resources
+## <a name="step-7"></a>CSFLE for Producer and Consumer
+## Google KMS
+
+Create a Key Ring and add a key to it. Copy the key's resource name as shown.
+
+![](images/create_keyring.jpg)
+
+![](images/create_key.jpg)
+
+![](images/key_resource_name.jpg)
+
+:warning: **Important:** Ensure you grant your Service Account the `Cloud KMS CryptoKey Encrypter/Decrypter` role on the Google KMS key you just created. Otherwise you will not be able to use the key to Encrypt/Decrypt your data!
+
+![](images/gcp_kms_grant_role.jpg)
+
+## Download Service Account Credentials
+
+Download the JSON credentials file for the service account you'd like to use (If you don't already have one, just create a new Key in JSON format and it will automatically be downloaded to your computer). 
+
+You will use the content found here in the Producer/Consumer properties files for `client.id`, `client.email`, `private.key.id`, and `private.key`
+
+![](images/create_SA_Key.jpg)
+
+![](images/create_json.jpg)
+
+## Register Tag and Schema
+1. First we need to create Schema Registry authentication in base64 encoded.
+```shell
+echo -n "<SR API Key:SR API Secret>" | base64
+```
+2. Save the output because we will need this later.
+
+3. Register the tag using this cli
+```shell
+curl --request POST --url 'https://<SR endpoint>/catalog/v1/types/tagdefs' --header 'Authorization: Basic <base64 encoded SR Key:Secret>' --header 'Content-Type: application/json' \
+--data '[ { "entityTypes" : [ "cf_entity" ],"name" :  "PII", "description" : "PII"} ]'
+```
+
+4. Now, register the schema with setting `PII` to the birthday field and defining the encryption rule
+
+```shell
+curl --request POST --url 'https://<SR endpoint>/subjects/csfle-test-value/versions' \
+  --header 'Authorization: Basic <base64 encoded SR Key:Secret>' \
+  --header 'content-type: application/vnd.schemaregistry.v1+json' \
+  --data '{"schemaType": "AVRO","schema": "{\"fields\": [{\"name\": \"cust_id\",\"type\": {\"avro.java.string\": \"String\",\"type\":\"string\"}},{\"name\": \"trans_id\",\"type\": {\"avro.java.string\": \"String\",\"type\": \"string\"}},{\"name\": \"card_number\",\"type\": {\"avro.java.string\": \"String\",\"type\": \"string\"}, \"confluent:tags\": [ \"PII\"]},{\"name\": \"amount\",\"type\": {\"avro.java.string\": \"String\",\"type\": \"string\"}}],\"name\": \"Transaction\",\"namespace\": \"io.confluent.developer.avro\",\"type\": \"record\"}","metadata": {"properties": {"owner": "<your name>","email": "<your email>"}}}'
+```
+
+## Register Rule
+
+```shell
+curl --request POST --url 'https://<SR endpoint>/subjects/csfle-test-value/versions' --header 'Authorization: Basic <base64 encoded SR Key:Secret>' --header 'Content-Type: application/vnd.schemaregistry.v1+json' \
+  --data '{
+        "ruleSet": {
+        "domainRules": [
+      {
+        "name": "encryptPII",
+        "kind": "TRANSFORM",
+        "type": "ENCRYPT",
+        "mode": "WRITEREAD",
+        "tags": ["PII"],
+        "params": {
+           "encrypt.kek.name": "csfle-gcp",
+           "encrypt.kms.key.id": "<KMS source ID",
+           "encrypt.kms.type": "gcp-kms"
+          },
+        "onFailure": "ERROR,NONE"
+        }
+        ]
+      } 
+    }'
+```
+
+We can check that everything is registered correctly by either executing
+```shell
+curl --request GET --url 'https://<SR endpoint>/subjects/csfle-test-value/versions/latest' --header 'Authorization: Basic <base64 encoded SR Key:Secret>' | jq
+```
+
+or in the CC UI
+
+![](images/CCEncryptionRule.png)
+
+## Producer configuration
+1. Back to the main directory of this github project and access the directory **SpringAvroProducerCSFLE**
+2. You need to fill all of the application.properties including the credentials from GCP service account that has KMS encryptor and decryptor to be used.
+3. Once all is being set, run the code
+```shell
+./gradlew generateAvroJava
+./gradlew bootRun
+```
+
+## Consumer configuration
+1. Back to the main directory of this github project and access the directory **SpringAvroConsumerCSFLE**
+2. You need to fill all of the application.properties including the credentials from GCP service account that has KMS encryptor and decryptor to be used.
+3. Once all is being set, run the code
+```shell
+./gradlew generateAvroJava
+./gradlew bootRun
+```
+
+Check what is the different between the first topic **avro** with the new one **avro_csfle**
+
+## <a name="step-8"></a>Clean Up Resources
 
 Deleting the resources you created during this workshop will prevent you from incurring additional charges. 
 
@@ -212,7 +318,7 @@ Deleting the resources you created during this workshop will prevent you from in
 
 *** 
 
-## <a name="step-8"></a>Confluent Resources and Further Testing
+## <a name="step-9"></a>Confluent Resources and Further Testing
 
 Here are some links to check out if you are interested in further testing:
 - [Confluent Cloud Documentation](https://docs.confluent.io/cloud/current/overview.html)
